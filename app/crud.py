@@ -51,6 +51,24 @@ def create_temperature(db: Session, city_id: int, temperature_value: float) -> m
     return t
 
 
+def create_temperatures_bulk(
+    db: Session,
+    items: list[tuple[int, float]],
+) -> list[models.Temperature]:
+    """Create many temperature rows in a single transaction.
+
+    This avoids calling db.commit() concurrently (SQLAlchemy Session is not
+    thread/task-safe) and is also more efficient than committing per row.
+    """
+    rows = [models.Temperature(city_id=city_id, temperature=value) for city_id, value in items]
+    db.add_all(rows)
+    db.commit()
+    # Refresh is optional here, but keeps behavior consistent with create_temperature.
+    for r in rows:
+        db.refresh(r)
+    return rows
+
+
 def list_temperatures(db: Session, city_id: int | None = None) -> list[models.Temperature]:
     stmt = select(models.Temperature).order_by(models.Temperature.date_time.desc())
     if city_id is not None:

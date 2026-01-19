@@ -31,24 +31,47 @@ async def update_temperatures(db: Session = Depends(get_db)):
     if not cities:
         raise HTTPException(status_code=400, detail="No cities in database. Add cities first.")
 
-    async def update_one(city):
+    async def fetch_one(city):
+        """Fetch temperature for a single city (async I/O only).
+
+        IMPORTANT: do not touch the DB session here because this coroutine is executed
+        concurrently across many tasks and SQLAlchemy Session is not concurrency-safe.
+        """
         try:
             temp = await fetch_current_temperature(city.name)
-            crud.create_temperature(db, city_id=city.id, temperature_value=temp)
-            return schemas.TemperatureUpdateResult(
-                city_id=city.id,
-                city_name=city.name,
-                ok=True,
-                temperature=temp,
-            )
+            return (city, temp, None)
         except (WeatherError, Exception) as e:
-            return schemas.TemperatureUpdateResult(
-                city_id=city.id,
-                city_name=city.name,
-                ok=False,
-                error=str(e),
+            return (city, None, str(e))
+
+    # 1) Run all external calls concurrently
+    fetched = await asyncio.gather(*(fetch_one(c) for c in cities))
+
+    # 2) Persist results in a single, sequential DB transaction
+    ok_items: list[tuple[int, float]] = []
+    results: list[schemas.TemperatureUpdateResult] = []
+
+    for city, temp, err in fetched:
+        if err is None and temp is not None:
+            ok_items.append((city.id, temp))
+            results.append(
+                schemas.TemperatureUpdateResult(
+                    city_id=city.id,
+                    city_name=city.name,
+                    ok=True,
+                    temperature=temp,
+                )
+            )
+        else:
+            results.append(
+                schemas.TemperatureUpdateResult(
+                    city_id=city.id,
+                    city_name=city.name,
+                    ok=False,
+                    error=err or "Unknown error",
+                )
             )
 
-    # Run all async fetches concurrently
-    results = await asyncio.gather(*(update_one(c) for c in cities))
+    if ok_items:
+        crud.create_temperatures_bulk(db, ok_items)
+
     return results
